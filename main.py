@@ -1,87 +1,94 @@
-import pandas as pd
-import numpy as np
-import joblib
 import os
 import logging
-import time
+import joblib
+import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
+from cleaner import merge_and_clean_datasets, clean_dataset
 from value_mapping import ValueMapping
-from cleaner import clean_fuel_type
 
 # === Logging ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Konfigurace ===
-csv_path = "car_data_all_final.csv"
+# === Paths ===
+aaa_path = "aaa_auto_data_copy2.csv"
+esa_path = "auto_esa_data.csv"
+csv_path = "car_data_all.csv"
 model_dir = "models"
 maps_dir = "maps"
 os.makedirs(model_dir, exist_ok=True)
 os.makedirs(maps_dir, exist_ok=True)
-model_paths = {
-    "rf": os.path.join(model_dir, "model_rf.pkl"),
-    "xgb": os.path.join(model_dir, "model_xgb.pkl"),
-    "mlp": os.path.join(model_dir, "model_mlp.pkl"),
-}
-scaler_path = os.path.join(model_dir, "scaler.pkl")
-features_path = os.path.join(model_dir, "features.pkl")
-maps_path = os.path.join(maps_dir, "value_mapping.json")
 
-# === Načtení a čištění dat ===
-logging.info(f"Načítám data z {csv_path}")
-df = pd.read_csv(csv_path)
-logging.info(f"Načteno {len(df)} záznamů")
+# === Příprava datasetu ===
+try:
+    if not os.path.exists(csv_path):
+        logging.info("[INFO] Spojuji a čistím datasety...")
+        merge_and_clean_datasets(aaa_path, esa_path, csv_path)
+        logging.info("[INFO] Dataset vytvořen.")
+    else:
+        logging.info("[INFO] Dataset existuje, provádím nové čištění pro jistotu...")
+        df = pd.read_csv(csv_path)
+        df = clean_dataset(df)
+        df.to_csv(csv_path, index=False)
+        logging.info("[INFO] Dataset byl znovu vyčištěn a uložen.")
+except Exception as e:
+    logging.error(f"[CHYBA] Problém při přípravě datasetu: {e}")
+    exit()
 
-df.dropna(subset=["price", "make", "model", "fuel_type", "transmission", "body_type"], inplace=True)
-df = df[df["price"] > 0]
-df["year"] = pd.to_numeric(df["year"], errors="coerce")
-df["mileage"] = pd.to_numeric(df["mileage"], errors="coerce")
-df["engine_power"] = pd.to_numeric(df["engine_power"], errors="coerce")
-df["price"] = pd.to_numeric(df["price"], errors="coerce")
-df.dropna(subset=["year", "mileage", "engine_power"], inplace=True)
-df["fuel_type"] = df["fuel_type"].apply(clean_fuel_type)
-logging.info(f"Data po čištění: {len(df)} záznamů")
+# === Načtení dat ===
+try:
+    logging.info(f"Načítám data z {csv_path}")
+    df = pd.read_csv(csv_path)
+    logging.info(f"Načteno {len(df)} záznamů")
+except Exception as e:
+    logging.error(f"Chyba při načítání dat: {e}")
+    exit()
 
-# === Příprava ===
+# === Výběr atributů ===
 features = ['make', 'model', 'year', 'mileage', 'fuel_type', 'transmission', 'engine_power', 'body_type']
 target = 'price'
+
+# === Rozdělení ===
 X = df[features]
 y = df[target]
-
-categorical = ['make', 'model', 'fuel_type', 'transmission', 'body_type']
-numeric = ['year', 'mileage', 'engine_power']
-
-X = pd.get_dummies(X, columns=categorical, drop_first=True)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+# === One-hot encoding ===
+categorical_features = ['make', 'model', 'fuel_type', 'transmission', 'body_type']
+numeric_features = ['year', 'mileage', 'engine_power']
+
+X_train = pd.get_dummies(X_train, columns=categorical_features, drop_first=True)
+X_test = pd.get_dummies(X_test, columns=categorical_features, drop_first=True)
 X_train, X_test = X_train.align(X_test, join="outer", axis=1, fill_value=0)
 
+# === Škálování ===
 scaler = StandardScaler()
-X_train[numeric] = scaler.fit_transform(X_train[numeric])
-X_test[numeric] = scaler.transform(X_test[numeric])
+X_train[numeric_features] = scaler.fit_transform(X_train[numeric_features])
+X_test[numeric_features] = scaler.transform(X_test[numeric_features])
 
+# === Vyhodnocení modelu ===
 def evaluate_model(name, model, param_grid):
-    logging.info(f"Trénuji {name}...")
-    start = time.time()
-    grid = GridSearchCV(model, param_grid, cv=3, scoring="neg_mean_absolute_error", n_jobs=-1)
-    grid.fit(X_train, y_train)
-    end = time.time()
+    try:
+        logging.info(f"Trénuji {name}...")
+        grid = GridSearchCV(model, param_grid, cv=3, scoring="neg_mean_absolute_error", n_jobs=-1)
+        grid.fit(X_train, y_train)
+        best = grid.best_estimator_
+        y_pred = best.predict(X_test)
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        logging.info(f"[{name}] Nejlepší parametry: {grid.best_params_}")
+        logging.info(f"[{name}] MAE: {mae:.2f} Kč, RMSE: {rmse:.2f} Kč")
+        return best
+    except Exception as e:
+        logging.error(f"Chyba u modelu {name}: {e}")
+        return None
 
-    best = grid.best_estimator_
-    y_pred = best.predict(X_test)
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-
-    logging.info(f"[{name}] Nejlepší parametry: {grid.best_params_}")
-    logging.info(f"[{name}] Trénink: {end - start:.2f} s, MAE: {mae:.2f} Kč, RMSE: {rmse:.2f} Kč")
-
-    return best
-
-# === Param Gridy ===
+# === Gridy ===
 rf_grid = {
     "n_estimators": [200, 300],
     "max_depth": [None, 30, 50],
@@ -107,21 +114,29 @@ mlp_grid = {
     "max_iter": [1000]
 }
 
-# === Trénuj modely ===
-#model_rf = evaluate_model("RandomForestRegressor", RandomForestRegressor(random_state=42), rf_grid)
-model_xgb = evaluate_model("XGBRegressor", XGBRegressor(random_state=42, verbosity=0), xgb_grid)
-#model_mlp = evaluate_model("MLPRegressor", MLPRegressor(random_state=42), mlp_grid)
+# === Trénování modelů ===
+models = {
+    "RandomForestRegressor": (RandomForestRegressor(random_state=42), rf_grid),
+    "XGBRegressor": (XGBRegressor(random_state=42, verbosity=0), xgb_grid)
+    #"MLPRegressor": (MLPRegressor(random_state=42), mlp_grid)
+}
 
-# === Uložení ===
-#joblib.dump(model_rf, model_paths["rf"])
-joblib.dump(model_xgb, model_paths["xgb"])
-#joblib.dump(model_mlp, model_paths["mlp"])
-joblib.dump(scaler, scaler_path)
-joblib.dump(X_train.columns.tolist(), features_path)
-logging.info(f"Modely a scaler uloženy do složky {model_dir}")
+trained_models = {}
+for name, (model, grid) in models.items():
+    best_model = evaluate_model(name, model, grid)
+    if best_model:
+        path = os.path.join(model_dir, f"model_{name.lower().replace('regressor', '')}.pkl")
+        joblib.dump(best_model, path)
+        trained_models[name] = path
+        logging.info(f"{name} uložen do {path}")
 
-# === Mapping ===
-mapping = ValueMapping(csv_path)
-mapping.generate()
-mapping.save(maps_path)
-logging.info(f"Value mapping uložen do {maps_path}")
+# === Uložení scaleru a feature columns ===
+joblib.dump(scaler, os.path.join(model_dir, "scaler.pkl"))
+joblib.dump(X_train.columns.tolist(), os.path.join(model_dir, "features.pkl"))
+logging.info("Scaler a seznam feature sloupců uložen.")
+
+# === Uložení value mapping ===
+mapper = ValueMapping(csv_path)
+mapper.generate()
+mapper.save(os.path.join(maps_dir, "value_mapping.json"))
+logging.info("Value mapping uložen.")
