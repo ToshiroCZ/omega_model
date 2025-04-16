@@ -1,0 +1,10 @@
+# IDE / cache
+.idea/
+__pycache__/
+*.pyc
+
+# Modely a dočasná data
+*.pkl
+*.csv
+maps/
+models/
